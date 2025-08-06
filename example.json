@@ -1,0 +1,25 @@
+{
+    "download": [
+    { 
+        "name":"example.jar" , 
+        "url":"https://example.com/example.jar",
+        "sha256":"92fc6417bbba6c8d63d8f48a548f31e1760f5a3b29e4c867685dfb4dfbc3bdd3",
+        "path":"mods/example.jar"
+    }, 
+    { 
+        "name":"example.toml" ,
+        "url":"https://example.com/example.toml", 
+        "sha256":"CBE63A0A1CB6AE8DBC0E29BB96D149A137CD4E714B295FA49D230994091D157F",
+        "path":"config/example.toml"
+    }
+    ],
+    "copy": [
+    { "file":"example.jar" , "path":"mods/example.jar" }, 
+    { "file":"example.toml" , "path":"config/example.toml" }
+    ],
+    "delete": [
+    { "deletefile":"example.jar"}, 
+    { "deletefile":"example.toml"},
+    { "deletefile":"mods/example2.jar"},
+    ]
+}
