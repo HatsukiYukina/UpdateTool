@@ -10,4 +10,7 @@ target_link_libraries(catclientupdatetool
         cJSON
         urlmon
         shlwapi
-        crypt32)
+        crypt32
+        comctl32
+        user32
+        gdi32)
