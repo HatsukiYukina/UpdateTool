@@ -1,35 +1,52 @@
-#include <stdio.h>
 #include <windows.h>
+#include <wincrypt.h>
+#include <shlwapi.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
-#include <wincrypt.h>
-#include <shlwapi.h>
 #include <time.h>
-#include <commctrl.h> //窗口控件，备用
 #include <process.h>  //多线程
 #include <stdbool.h>
 #include <locale.h>
 #include "cJSON.h"
-#pragma comment(lib, "urlmon.lib")
+//imgui
+//#include "imgui.h"
+//#include "imgui_impl_win32.h"
+//#include "imgui_impl_opengl3.h"
+
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "crypt32.lib")
 
 #define BUFSIZE 1024
 #define SHA256_LEN 32
 #define WM_APP_LOG_MESSAGE (WM_APP + 1)
+//日志等级
+//#define LOG_LEVEL_INFO 1
+//#define LOG_LEVEL_WARNING 2
+//#define LOG_LEVEL_ERROR 3
+//是的，做日志等级需要大规模重写，懒得写
 
+//都是史山，删了可能会增加红色感叹号
 HWND hWnd;
 HWND hEdit;
 HANDLE hConsoleOutput;
 int num;
 FILE *file;
+FILE* g_logFile = NULL;
+char g_logFilePath[MAX_PATH];
 char url[1024];
 char outputFileName[256];
 char cwd[1024];
 bool g_bRunning = true;
 HANDLE hMutex;  // 用于线程同步
 bool g_bWindowReady = false;
+const char* json_url = "https://web.nyauru.cn/update.json";
+
+#define MAX_LOG_LINES 100
+char g_logBuffer[MAX_LOG_LINES][1024];
+int g_logLineCount = 0;
+HANDLE g_logMutex = NULL;
 
 void process_downloads(cJSON *download_array);
 void process_copies(cJSON *copy_array);
@@ -37,102 +54,37 @@ void process_deletes(cJSON *delete_array);
 BOOL verify_sha256(const char *file_path, const char *expected_hash);
 char* calculate_sha256(const char *file_path);
 HRESULT download_file(const char *url, const char *temp_path, const char *final_path, const char *sha256);
-
-void InitGUI();
 void LogMessage(const char* format, ...);
-void AppendToEditControl(const wchar_t* text);
-void InitGUI();
-void LogMessage(const char* format, ...);
+void InitLogFile();
+void CloseLogFile();
+void WriteToLog(const char* format, va_list args);
 
 //图形进程
 unsigned __stdcall WindowThread(void* pArg) {
-    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-
-    INITCOMMONCONTROLSEX icc;
-    icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_STANDARD_CLASSES;
-    InitCommonControlsEx(&icc);
-
-    InitGUI();  //GUI初始化
-
-    //通知主线程窗口已就绪
-    g_bWindowReady = true;
-
-    MSG msg;
-    while (g_bRunning) {
-        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) {
-                g_bRunning = false;
-                break;
-            }
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-
-        //防止CPU占用过高，
-        Sleep(10);
-    }
-
-    CoUninitialize();
-    return 0;
 }
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+int main() {
     _wsetlocale(LC_ALL, L"zh_CN.UTF-8");
     SetConsoleOutputCP(65001);
+    InitLogFile(); //在启动gui之前尝试初始化log函数，当然，log没有起单独线程，绑定在主线程内。
 
-    //互斥
-    hMutex = CreateMutex(NULL, FALSE, NULL);
-    if (!hMutex) {
-        MessageBoxW(NULL, L"WARN:创建互斥量失败", L"错误", MB_ICONERROR);
-        return 1;
-    }
-    //窗口线程
-    HANDLE hThread = (HANDLE)_beginthreadex(NULL, 0, WindowThread, NULL, 0, NULL);
-    if (!hThread) {
-        MessageBoxW(NULL, L"WARN:GUI线程创建失败", L"错误", MB_ICONERROR);
-        CloseHandle(hMutex);
-        return 1;
-    }
-    //等待窗口初始化
-    while (!g_bWindowReady) {
-        Sleep(100);
-    }
-
-    //确保窗口创建成功
-    int waitCount = 0;
-    while (hWnd == NULL && waitCount < 50) {  //等5秒
-        Sleep(100);
-        waitCount++;
-    }
-
-    if (hWnd == NULL) {
-        MessageBoxW(NULL, L"WARN:窗口创建超时", L"错误", MB_ICONERROR);
-        g_bRunning = false;
-        WaitForSingleObject(hThread, INFINITE);
-        CloseHandle(hThread);
-        CloseHandle(hMutex);
-        return 1;
-    }
     AllocConsole();
 
     freopen("CONOUT$", "w", stdout);
     freopen("CONOUT$", "w", stderr);
     LogMessage("已启动更新检查程序\n");
-    LogMessage("当前版本v1.2.2\n");
+    LogMessage("当前版本v1.2.3\n");
     if (getcwd(cwd, sizeof(cwd)) != NULL) {
         LogMessage("请注意，程序当前工作在这个目录==> %s\n", cwd);
         LogMessage("如果您在非minecraft版本目录执行该程序，可能造成其他不可预料的后果！\n");
     } else {
-        perror("getcwd() 获取工作目录失败，为安全起见，本更新程序将会退出以保护您的系统，请您手动检查程序运行目录。");
+        perror("获取工作目录失败，为安全起见，本更新程序将会退出以保护您的系统，请您手动检查程序运行目录。");
         return 10;
     }
 
-    LogMessage("正在尝试连接硬编码更新服务器地址\n");
+    LogMessage("正在尝试获取清单:\n");
     char json_full_url[2048];
     srand((unsigned int)time(NULL)); //时间种子生成器
-        //硬编码url
-        const char* json_url = "https://web.nyauru.cn/update.json";
         sprintf(json_full_url, "%s?rand=%d", json_url, rand());
 
         HRESULT hr = URLDownloadToFileA(
@@ -206,8 +158,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         LogMessage("程序将等待5s自动退出\n");
     //使用sleep等待5s，让用户看清发生了什么，不然执行速度太快了，用户会有疑问
     sleep(5);
+    WaitForSingleObject(hThread, INFINITE);
     CloseHandle(hThread);
     CloseHandle(hMutex);
+    CloseLogFile();
     return 0;
 }
 
@@ -327,23 +281,6 @@ HRESULT download_file(const char *url, const char *temp_path, const char *final_
     return S_OK;
 }
 
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    switch (uMsg) {
-        case WM_APP_LOG_MESSAGE: {
-            wchar_t* msg = (wchar_t*)lParam;
-            if (msg && hEdit) {
-                int len = GetWindowTextLengthW(hEdit);
-                SendMessageW(hEdit, EM_SETSEL, len, len);
-                SendMessageW(hEdit, EM_REPLACESEL, FALSE, (LPARAM)msg);
-                SendMessageW(hEdit, EM_SCROLLCARET, 0, 0);
-                free(msg);
-            }
-            return 0;
-        }
-    }
-    return DefWindowProcW(hwnd, uMsg, wParam, lParam);
-}
-
 void process_downloads(cJSON *download_array) {
     //如果那个写json的baka把json填错了，这个检查可以饶他一命
     if (download_array == NULL || !cJSON_IsArray(download_array)) {
@@ -407,53 +344,15 @@ void process_deletes(cJSON *delete_array) {
     }
 }
 
-void InitGUI() {
-    WNDCLASSW wc = {0};
-    wc.lpfnWndProc = WindowProc;
-    wc.hInstance = GetModuleHandleW(NULL);
-    wc.lpszClassName = L"UpdateClient";
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW+1);
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    RegisterClassW(&wc);
-
-    hWnd = CreateWindowExW(
-        0, L"UpdateClient", L"更新工具",
-        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-        CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
-        NULL, NULL, GetModuleHandleW(NULL), NULL
-    );
-
-    if (!hWnd) {
-        MessageBoxW(NULL, L"WARN:窗口创建失败", L"错误", MB_ICONERROR);
-        return;
-    }
-
-    hEdit = CreateWindowExW(
-        WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE |
-        ES_AUTOVSCROLL | ES_READONLY | ES_WANTRETURN,
-        0, 0, 800, 600,
-        hWnd, (HMENU)1, GetModuleHandleW(NULL), NULL
-    );
-
-    HFONT hFont = CreateFontW(
-        16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        GB2312_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-        L"Microsoft YaHei"
-    );
-    SendMessageW(hEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
-
-    ShowWindow(hWnd, SW_SHOW);
-    UpdateWindow(hWnd);
-}
-
 void LogMessage(const char* format, ...) {
     char buffer[1024];
     va_list args;
     va_start(args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+
+    va_start(args, format);
+    WriteToLog(format, args);
     va_end(args);
 
     printf("%s", buffer);
@@ -544,9 +443,45 @@ char* calculate_sha256(const char *file_path) {
     return hex_hash;
 }
 
-void AppendToEditControl(const wchar_t* text) {
-    int len = GetWindowTextLengthW(hEdit);
-    SendMessageW(hEdit, EM_SETSEL, len, len);
-    SendMessageW(hEdit, EM_REPLACESEL, FALSE, (LPARAM)text);
-    SendMessageW(hEdit, EM_SCROLLCARET, 0, 0);
+void InitLogFile() {
+    //获取当前日期时间作为文件名
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    strftime(g_logFilePath, MAX_PATH, "updater_%Y%m%d_%H%M%S.log", tm_info);
+
+    //打开日志文件
+    g_logFile = fopen(g_logFilePath, "a");
+    if (!g_logFile) {
+        MessageBoxW(NULL, L"无法创建日志文件", L"错误", MB_ICONERROR);
+        return;
+    }
+
+    //日志标题
+    fprintf(g_logFile, "#Update tool log file\n");
+    fprintf(g_logFile, "#create time: %s", ctime(&now));
+    fprintf(g_logFile, "Ciallo～ (∠・ω< )⌒☆\n\n");
+    fflush(g_logFile);
 }
+
+void CloseLogFile() {
+    if (g_logFile) {
+        fprintf(g_logFile, "\n#End of log\n");
+        fclose(g_logFile);
+        g_logFile = NULL;
+    }
+}
+
+void WriteToLog(const char* format, va_list args) {
+    if (!g_logFile) return;
+    //反正是一堆时间，懒得写注释
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    char time_buf[20];
+    strftime(time_buf, 20, "%H:%M:%S", tm_info);
+
+    fprintf(g_logFile, "[%s] ", time_buf);
+
+    vfprintf(g_logFile, format, args);
+    fflush(g_logFile);
+}
+
