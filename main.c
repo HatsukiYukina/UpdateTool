@@ -55,7 +55,8 @@ void LogMessage(const char* format, ...);  //printf+log+gui3合1，您不得不�
 void InitLogFile();  //初始化日志文件
 void CloseLogFile();  //关闭日志文件
 void WriteToLog(const char* format, va_list args);  //写数据到日志
-bool IsValidHttpUrl(const char *url); //http url检查
+bool IsValidHttpUrl(const char *url); //http
+void OpenLogFile(const char * log_path); //打开log
 //不要尝试修改史山，会崩塌
 //这个下面是gui相关的代码，建议折叠
 //全局控件指针
@@ -73,9 +74,18 @@ static int onClosing(uiWindow *w, void *data) {
     uiQuit();
     return 1;
 }
+
 //按钮被点击之后的回调
 static void onButtonClicked(uiButton *b, void *data) {
+    const char *logPath = "update.log";
+    OpenLogFile(logPath);
 
+    // 可选：在日志框中添加记录
+    uiMultilineEntryAppend(logEntry, "[系统] 尝试打开日志文件\n");
+}
+static void onExitButtonClicked(uiButton *b, void *data) {
+    uiQuit();
+    _exit(0); //零帧起手
 }
 //初始化gui，及运行逻辑
 void setupUI() {
@@ -95,11 +105,11 @@ void setupUI() {
     uiBoxAppend(vbox, uiControl(hbox), 0);  //忘记说了，0表示不伸缩，1代表可伸缩
     //按钮组件
     button = uiNewButton("打开日志");
-    uiButtonOnClicked(button, onButtonClicked, NULL);
+    uiButtonOnClicked(button, onButtonClicked, NULL); //回调打开日志函数
     uiBoxAppend(hbox, uiControl(button), 0);
     //第二个按钮
     button = uiNewButton("退出更新");
-    uiButtonOnClicked(button, onButtonClicked, NULL);
+    uiButtonOnClicked(button, onExitButtonClicked, NULL); //回调关闭函数
     uiBoxAppend(hbox, uiControl(button), 0);
 
     uiLabel *label = uiNewLabel("Ciallo～ (∠・ω< )⌒☆");
@@ -130,12 +140,13 @@ unsigned __stdcall WindowThread(void* pArg) {
     return 0;
 }
 //gui相关代码结束
-
+//主线程启动
 int main(int argc, char *argv[]) {
     //先这么干，输出中文先
     _wsetlocale(LC_ALL, L"zh_CN.UTF-8");
     SetConsoleOutputCP(65001);
     AllocConsole(); //开启终端
+    InitLogFile(); //在启动gui之前尝试初始化log函数，当然，log没有起单独线程，绑定在主线程内。
     //我等不及了，抓紧启动gui线程吧，只要启动了gui线程，一切都会好起来的，只要能够到达那个地方
     _beginthreadex(NULL, 0, WindowThread, NULL, 0, NULL);
     //处理传入参数
@@ -154,16 +165,15 @@ int main(int argc, char *argv[]) {
             return 9;
         }
     } else {
-        printf("未提供参数，使用默认jsonURL\n");
+        LogMessage("未提供参数，使用默认jsonURL\n");
     }
 
     LogMessage("最终jsonURL: %s\n", json_url);
-    InitLogFile(); //在启动gui之前尝试初始化log函数，当然，log没有起单独线程，绑定在主线程内。
 
     freopen("CONOUT$", "w", stdout);
     freopen("CONOUT$", "w", stderr);
     LogMessage("已启动更新检查程序\n");
-    LogMessage("当前版本v1.2.4\n");
+    LogMessage("版本v1.2.4-C.ver\n");
     if (getcwd(cwd, sizeof(cwd)) != NULL) {
         LogMessage("请注意，程序当前工作在这个目录==> %s\n", cwd);
         LogMessage("如果您在非minecraft版本目录执行该程序，可能造成其他不可预料的后果！\n");
@@ -171,8 +181,11 @@ int main(int argc, char *argv[]) {
         perror("获取工作目录失败，为安全起见，本更新程序将会退出以保护您的系统，请您手动检查程序运行目录。");
         return 10;
     }
-
-    LogMessage("正在尝试获取清单:\n");
+    LogMessage("----------------------\n");
+    LogMessage("如果您发现更新慢，无法更新等问题，可直接点击退出更新按钮\n");
+    LogMessage("程序将返回0值(执行成功)，并继续启动游戏，但您的游戏可能不会是最新版\n");
+    LogMessage("----------------------\n");
+    LogMessage("正在尝试获取清单\n");
     char json_full_url[2048];
     srand((unsigned int)time(NULL)); //时间种子生成器
         sprintf(json_full_url, "%s?rand=%d", json_url, rand());
@@ -247,7 +260,7 @@ int main(int argc, char *argv[]) {
         LogMessage("\n所有操作已完成！\n");
         LogMessage("程序将等待5s自动退出\n");
     //使用sleep等待5s，让用户看清发生了什么，不然执行速度太快了，用户会有疑问
-    sleep(10);
+    sleep(5);
     CloseLogFile();
     return 0;
 }
@@ -518,10 +531,15 @@ char* calculate_sha256(const char *file_path) {
 }
 
 void InitLogFile() {
+
+    char deletelogfile [128] = "update.log";
+    delete_file(deletelogfile); //每次启动清除以前的log
+
     //获取当前日期时间作为文件名
     time_t now = time(NULL);
     struct tm* tm_info = localtime(&now);
-    strftime(g_logFilePath, MAX_PATH, "updatetool_%Y%m%d_%H%M%S.log", tm_info);
+    strftime(g_logFilePath, MAX_PATH, "update.log", tm_info);
+
 
     //打开日志文件
     g_logFile = fopen(g_logFilePath, "a");
@@ -581,3 +599,21 @@ bool IsValidHttpUrl(const char *url) {
 
     return true;
 }//怕用户是春竹，填错http地址，暴力检查
+
+void OpenLogFile(const char *filepath) {
+    if (filepath == NULL || filepath[0] == '\0') {
+        uiMsgBoxError(mainwin, "错误", "日志文件路径为空");
+        return;
+    }
+
+    //检查文件是否存在
+    if (access(filepath, F_OK) != 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "日志文件不存在:\n%s", filepath);
+        uiMsgBoxError(mainwin, "错误", msg);
+        return;
+    }
+    //打开
+    ShellExecuteA(NULL, "open", filepath, NULL, NULL, SW_SHOW);
+}
+
