@@ -9,12 +9,10 @@
 #include <process.h>  //多线程
 #include <stdbool.h>
 #include <locale.h>
+#include <ctype.h> //验证url
 #include "cJSON.h"
-//imgui
-//#include "imgui.h"
-//#include "imgui_impl_win32.h"
-//#include "imgui_impl_opengl3.h"
-
+#include "ui.h"
+#include "ui_windows.h"
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "crypt32.lib")
 
@@ -28,52 +26,144 @@
 //是的，做日志等级需要大规模重写，懒得写
 
 //都是史山，删了可能会增加红色感叹号
-HWND hWnd;
-HWND hEdit;
-HANDLE hConsoleOutput;
+HWND hWnd; //不知道干什么的，反正和windowsapi有关
+HWND hEdit; //同上
+HANDLE hConsoleOutput; //不知道干什么的
 int num;
 FILE *file;
 FILE* g_logFile = NULL;
 char g_logFilePath[MAX_PATH];
-char url[1024];
-char outputFileName[256];
-char cwd[1024];
-bool g_bRunning = true;
-HANDLE hMutex;  // 用于线程同步
-bool g_bWindowReady = false;
-const char* json_url = "https://web.nyauru.cn/update.json";
+char url[1024];  //url缓存字符串
+char outputFileName[256];  //文件输出缓存字符串
+char cwd[1024];  //路径缓存字符串
+const char *DEFAULT_JSON_URL = "https://web.nyauru.cn/update.json";  //如果您喜欢免命令行输入参数启动，那么您不得不品品这个东西，至尊硬编码url，忘记说了，头文件你自己配，cmake也自己配
+char* json_url[1024]; //jsonurl的最终版本
 
-#define MAX_LOG_LINES 100
+#define MAX_LOG_LINES 10000
 char g_logBuffer[MAX_LOG_LINES][1024];
 int g_logLineCount = 0;
 HANDLE g_logMutex = NULL;
-
-void process_downloads(cJSON *download_array);
-void process_copies(cJSON *copy_array);
-void process_deletes(cJSON *delete_array);
-BOOL verify_sha256(const char *file_path, const char *expected_hash);
-char* calculate_sha256(const char *file_path);
-HRESULT download_file(const char *url, const char *temp_path, const char *final_path, const char *sha256);
-void LogMessage(const char* format, ...);
-void InitLogFile();
-void CloseLogFile();
-void WriteToLog(const char* format, va_list args);
-
-//图形进程
-unsigned __stdcall WindowThread(void* pArg) {
+//史山结束
+//下面是函数的史山，您都可以在主函数后面找到它们
+void process_downloads(cJSON *download_array); //下载处理函数
+void process_copies(cJSON *copy_array); //复制处理函数
+void process_deletes(cJSON *delete_array);  //删除处理函数
+BOOL verify_sha256(const char *file_path, const char *expected_hash);  //sha256验证器
+char* calculate_sha256(const char *file_path);  //sha256计算器
+HRESULT download_file(const char *url, const char *temp_path, const char *final_path, const char *sha256);  //p2p糕树下崽器
+void LogMessage(const char* format, ...);  //printf+log+gui3合1，您不得不选的好物，用它替代您丑陋的printf
+void InitLogFile();  //初始化日志文件
+void CloseLogFile();  //关闭日志文件
+void WriteToLog(const char* format, va_list args);  //写数据到日志
+bool IsValidHttpUrl(const char *url); //http url检查
+//不要尝试修改史山，会崩塌
+//这个下面是gui相关的代码，建议折叠
+//全局控件指针
+static uiWindow *mainwin;
+static uiMultilineEntry *logEntry;
+static uiButton *button;
+//追加log到gui
+static void appendToLog(void *data) {
+    char *text = (char *)data;
+    uiMultilineEntryAppend(logEntry, text);
+    free(text);
 }
+//关闭gui线程的函数
+static int onClosing(uiWindow *w, void *data) {
+    uiQuit();
+    return 1;
+}
+//按钮被点击之后的回调
+static void onButtonClicked(uiButton *b, void *data) {
 
-int main() {
+}
+//初始化gui，及运行逻辑
+void setupUI() {
+    mainwin = uiNewWindow("更新工具", 800, 600, 0);
+    uiWindowSetMargined(mainwin, 1);
+    //垂直布局容器
+    uiBox *vbox = uiNewVerticalBox();
+    uiBoxSetPadded(vbox, 1);
+    uiWindowSetChild(mainwin, uiControl(vbox));
+    //输出日志用的多行文本框
+    logEntry = uiNewMultilineEntry();
+    uiMultilineEntrySetReadOnly(logEntry, 1);
+    uiBoxAppend(vbox, uiControl(logEntry), 1);
+    //水平布局容器
+    uiBox *hbox = uiNewHorizontalBox();
+    uiBoxSetPadded(hbox, 1);
+    uiBoxAppend(vbox, uiControl(hbox), 0);  //忘记说了，0表示不伸缩，1代表可伸缩
+    //按钮组件
+    button = uiNewButton("打开日志");
+    uiButtonOnClicked(button, onButtonClicked, NULL);
+    uiBoxAppend(hbox, uiControl(button), 0);
+    //第二个按钮
+    button = uiNewButton("退出更新");
+    uiButtonOnClicked(button, onButtonClicked, NULL);
+    uiBoxAppend(hbox, uiControl(button), 0);
+
+    uiLabel *label = uiNewLabel("Ciallo～ (∠・ω< )⌒☆");
+    uiBoxAppend(hbox, uiControl(label), 1);
+    //窗口关闭回调
+    uiWindowOnClosing(mainwin, onClosing, NULL);
+    uiControlShow(uiControl(mainwin));
+}
+//单独的图形进程
+unsigned __stdcall WindowThread(void* pArg) {
+    #ifdef _WIN32
+        SetProcessDPIAware();  //DPI 感知，make程序清晰の能力
+    #endif
+    uiInitOptions options = {0};
+    const char *err = uiInit(&options);
+    if (err) {
+        fprintf(stderr, "初始化失败: %s\n", err);
+        uiFreeInitError(err);
+        return 1;
+    }
+
+    setupUI();
+
+    LogMessage("GUI线程已启动！\n");
+
+    uiMain();
+    uiUninit();
+    return 0;
+}
+//gui相关代码结束
+
+int main(int argc, char *argv[]) {
+    //先这么干，输出中文先
     _wsetlocale(LC_ALL, L"zh_CN.UTF-8");
     SetConsoleOutputCP(65001);
-    InitLogFile(); //在启动gui之前尝试初始化log函数，当然，log没有起单独线程，绑定在主线程内。
+    AllocConsole(); //开启终端
+    //我等不及了，抓紧启动gui线程吧，只要启动了gui线程，一切都会好起来的，只要能够到达那个地方
+    _beginthreadex(NULL, 0, WindowThread, NULL, 0, NULL);
+    //处理传入参数
+    const char *json_url = DEFAULT_JSON_URL; //将内部url先作为默认值
+    if (argc >= 2) {
+        //如果第一个参数不是空字符串，就用用户给出的
+        if (argv[1][0] != '\0') {
+            json_url = argv[1];
+            LogMessage("使用自定义的jsonURL\n");
+        } else {
+            LogMessage("参数为空，使用默认jsonURL\n");
+        }
+        if (!IsValidHttpUrl(argv[1])) {
+            fprintf(stderr, "WARN:URL必须以 http:// 或 https:// 开头！且包含域名，你这个baka！再去练习两年半吧!\n");
+            fprintf(stderr, "示例: %s \"https://example.com/update.json\"\n", argv[0]);
+            return 9;
+        }
+    } else {
+        printf("未提供参数，使用默认jsonURL\n");
+    }
 
-    AllocConsole();
+    LogMessage("最终jsonURL: %s\n", json_url);
+    InitLogFile(); //在启动gui之前尝试初始化log函数，当然，log没有起单独线程，绑定在主线程内。
 
     freopen("CONOUT$", "w", stdout);
     freopen("CONOUT$", "w", stderr);
     LogMessage("已启动更新检查程序\n");
-    LogMessage("当前版本v1.2.3\n");
+    LogMessage("当前版本v1.2.4\n");
     if (getcwd(cwd, sizeof(cwd)) != NULL) {
         LogMessage("请注意，程序当前工作在这个目录==> %s\n", cwd);
         LogMessage("如果您在非minecraft版本目录执行该程序，可能造成其他不可预料的后果！\n");
@@ -157,10 +247,7 @@ int main() {
         LogMessage("\n所有操作已完成！\n");
         LogMessage("程序将等待5s自动退出\n");
     //使用sleep等待5s，让用户看清发生了什么，不然执行速度太快了，用户会有疑问
-    sleep(5);
-    WaitForSingleObject(hThread, INFINITE);
-    CloseHandle(hThread);
-    CloseHandle(hMutex);
+    sleep(10);
     CloseLogFile();
     return 0;
 }
@@ -357,20 +444,7 @@ void LogMessage(const char* format, ...) {
 
     printf("%s", buffer);
 
-    if (hWnd && g_bRunning) {
-        int wide_len = MultiByteToWideChar(CP_UTF8, 0, buffer, -1, NULL, 0);
-        if (wide_len > 0) {
-            wchar_t* wide_buf = (wchar_t*)malloc(wide_len * sizeof(wchar_t));
-            if (wide_buf) {
-                MultiByteToWideChar(CP_UTF8, 0, buffer, -1, wide_buf, wide_len);
-
-                if (!PostMessageW(hWnd, WM_APP_LOG_MESSAGE, 0, (LPARAM)wide_buf)) {
-                    free(wide_buf);
-                    printf("PostMessage failed: %lu\n", GetLastError());
-                }
-            }
-        }
-    }
+    uiQueueMain(appendToLog, strdup(buffer));//提交log到gui线程
 }
 
 char* calculate_sha256(const char *file_path) {
@@ -447,7 +521,7 @@ void InitLogFile() {
     //获取当前日期时间作为文件名
     time_t now = time(NULL);
     struct tm* tm_info = localtime(&now);
-    strftime(g_logFilePath, MAX_PATH, "updater_%Y%m%d_%H%M%S.log", tm_info);
+    strftime(g_logFilePath, MAX_PATH, "updatetool_%Y%m%d_%H%M%S.log", tm_info);
 
     //打开日志文件
     g_logFile = fopen(g_logFilePath, "a");
@@ -458,8 +532,8 @@ void InitLogFile() {
 
     //日志标题
     fprintf(g_logFile, "#Update tool log file\n");
-    fprintf(g_logFile, "#create time: %s", ctime(&now));
-    fprintf(g_logFile, "Ciallo～ (∠・ω< )⌒☆\n\n");
+    fprintf(g_logFile, "#Create time: %s", ctime(&now));
+    fprintf(g_logFile, "#Ciallo～ (∠・ω< )⌒☆\n\n");
     fflush(g_logFile);
 }
 
@@ -485,3 +559,25 @@ void WriteToLog(const char* format, va_list args) {
     fflush(g_logFile);
 }
 
+bool IsValidHttpUrl(const char *url) {
+    if (url == NULL || url[0] == '\0') {
+        return false;
+    }
+
+    //检查协议头
+    const char *p = url;
+    if (strncasecmp(p, "http://", 7) == 0) {
+        p += 7;
+    } else if (strncasecmp(p, "https://", 8) == 0) {
+        p += 8;
+    } else {
+        return false;
+    }
+
+    //检查至少有一个域名字符
+    if (*p == '\0' || *p == '/') {
+        return false;
+    }
+
+    return true;
+}//怕用户是春竹，填错http地址，暴力检查
